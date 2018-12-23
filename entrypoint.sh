@@ -63,9 +63,10 @@ if [[ "a${DEBUG}" == "atrue" ]]; then
   echo "Run mitmproxy with reverse pointing to the same certs..."
   mitmweb --no-web-open-browser --web-iface 0.0.0.0 --web-port 8081 \
           --set keep_host_header=true --set ssl_insecure=true \
+          --set stream_large_bodies=2k \
           --mode reverse:https://127.0.0.1:444 --listen-host 0.0.0.0 \
           --listen-port 443 --certs /certs/fullchain_with_key.pem \
-          --stream_large_bodies 2k -w /ca/outfile &
+          -w /ca/outfile &
   echo "Access mitmweb via http://127.0.0.1:8081/ "
 fi
 
