@@ -3,14 +3,14 @@
 set -Eeuo pipefail
 trap "echo TRAPed signal" HUP INT QUIT TERM
 
- #configure nginx DNS settings to match host, why must we do that nginx?
- conf="resolver $(/usr/bin/awk 'BEGIN{ORS=" "} $1=="nameserver" {print $2}' /etc/resolv.conf) ipv6=off; # Avoid ipv6 addresses for now"
- [ "$conf" = "resolver ;" ] && echo "no nameservers found" && exit 0
- confpath=/etc/nginx/resolvers.conf
- if [ ! -e $confpath ] || [ "$conf" != "$(cat $confpath)" ]
- then
-     echo "$conf" > $confpath
- fi
+#configure nginx DNS settings to match host, why must we do that nginx?
+conf="resolver $(/usr/bin/awk 'BEGIN{ORS=" "} $1=="nameserver" {print $2}' /etc/resolv.conf) ipv6=off; # Avoid ipv6 addresses for now"
+[ "$conf" = "resolver ;" ] && echo "no nameservers found" && exit 0
+confpath=/etc/nginx/resolvers.conf
+if [ ! -e $confpath ] || [ "$conf" != "$(cat $confpath)" ]
+then
+    echo "$conf" > $confpath
+fi
 
 # The list of SAN (Subject Alternative Names) for which we will create a TLS certificate.
 ALLDOMAINS=""
@@ -34,15 +34,34 @@ export ALLDOMAINS=${ALLDOMAINS:1} # remove the first comma and export
 # Now handle the auth part.
 echo -n "" > /etc/nginx/docker.auth.map
 
-for ONEREGISTRYIN in ${AUTH_REGISTRIES}; do
-    ONEREGISTRY=$(echo -n ${ONEREGISTRYIN} | xargs) # Remove whitespace
-    AUTH_HOST=$(echo -n ${ONEREGISTRY} | cut -d ":" -f 1 | xargs)
-    AUTH_USER=$(echo -n ${ONEREGISTRY} | cut -d ":" -f 2 | xargs)
-    AUTH_PASS=$(echo -n ${ONEREGISTRY} | cut -d ":" -f 3 | xargs)
-    AUTH_BASE64=$(echo -n ${AUTH_USER}:${AUTH_PASS} | base64 | xargs)
-    echo "Adding Auth for registry '${AUTH_HOST}' with user '${AUTH_USER}'."
-    echo "\"${AUTH_HOST}\" \"${AUTH_BASE64}\";" >> /etc/nginx/docker.auth.map
-done
+# Only configure auth registries if the env var contains values
+if [ "$AUTH_REGISTRIES" ]; then
+    # Ref: https://stackoverflow.com/a/47633817/219530
+    AUTH_REGISTRIES_DELIMITER=${AUTH_REGISTRIES_DELIMITER:-" "}
+    s=$AUTH_REGISTRIES$AUTH_REGISTRIES_DELIMITER
+    auth_array=();
+    while [[ $s ]]; do
+        auth_array+=( "${s%%"$AUTH_REGISTRIES_DELIMITER"*}" );
+        s=${s#*"$AUTH_REGISTRIES_DELIMITER"};
+    done
+
+    AUTH_REGISTRY_DELIMITER=${AUTH_REGISTRY_DELIMITER:-":"}
+
+    for ONEREGISTRY in "${auth_array[@]}"; do
+        s=$ONEREGISTRY$AUTH_REGISTRY_DELIMITER
+        registry_array=();
+        while [[ $s ]]; do
+            registry_array+=( "${s%%"$AUTH_REGISTRY_DELIMITER"*}" );
+            s=${s#*"$AUTH_REGISTRY_DELIMITER"};
+        done
+        AUTH_HOST="${registry_array[0]}"
+        AUTH_USER="${registry_array[1]}"
+        AUTH_PASS="${registry_array[2]}"
+        AUTH_BASE64=$(echo -n ${AUTH_USER}:${AUTH_PASS} | base64 -w0 | xargs)
+        echo "Adding Auth for registry '${AUTH_HOST}' with user '${AUTH_USER}'."
+        echo "\"${AUTH_HOST}\" \"${AUTH_BASE64}\";" >> /etc/nginx/docker.auth.map
+    done
+fi
 
 echo "" > /etc/nginx/docker.verify.ssl.conf
 if [[ "a${VERIFY_SSL}" == "atrue" ]]; then
@@ -61,6 +80,13 @@ fi
 echo "        listen 443 ssl default_server;" > /etc/nginx/caching.layer.listen
 echo "error_log  /var/log/nginx/error.log warn;" > /etc/nginx/error.log.debug.warn
 
+# Set Docker Registry cache size, by default, 32 GB ('32g')
+CACHE_MAX_SIZE=${CACHE_MAX_SIZE:-32g}
+
+# The cache directory. This can get huge. Better to use a Docker volume pointing here!
+# Set to 32gb which should be enough
+echo "proxy_cache_path /docker_mirror_cache levels=1:2 max_size=$CACHE_MAX_SIZE inactive=60d keys_zone=cache:10m use_temp_path=off;" > /etc/nginx/conf.d/cache_max_size.conf
+
 # normally use non-debug version of nginx
 NGINX_BIN="nginx"
 
@@ -72,7 +98,6 @@ if [[ "a${DEBUG}" == "atrue" ]]; then
   echo "Run mitmproxy with reverse pointing to the same certs..."
   mitmweb --no-web-open-browser --web-iface 0.0.0.0 --web-port 8081 \
           --set keep_host_header=true --set ssl_insecure=true \
-          --set stream_large_bodies=2k \
           --mode reverse:https://127.0.0.1:444 --listen-host 0.0.0.0 \
           --listen-port 443 --certs /certs/fullchain_with_key.pem \
           -w /ca/outfile &
